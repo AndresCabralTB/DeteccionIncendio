@@ -1,11 +1,10 @@
 import cv2
 import os
 import numpy as np
-from PyQt6.QtWidgets import QCheckBox, QMessageBox, QLineEdit,  QApplication, QMainWindow, QPushButton, QLabel, QVBoxLayout, QHBoxLayout, QWidget, QFileDialog, QSlider, QSizePolicy, QDialog, QComboBox, QDialogButtonBox
+from PyQt6.QtWidgets import QCheckBox, QMessageBox, QLineEdit, QApplication, QMainWindow, QPushButton, QLabel, QVBoxLayout, QHBoxLayout, QWidget, QFileDialog, QSlider, QSizePolicy, QDialog, QComboBox, QDialogButtonBox
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QPixmap, QImage, QFont
 from ultralytics import YOLO
-
 
 class ObjectDetectionApp(QMainWindow):
     def __init__(self):
@@ -20,7 +19,7 @@ class ObjectDetectionApp(QMainWindow):
             "Large": YOLO("/Users/andrescabral/Desktop/Prácticas /WildFire UI/Models/fire_l.pt"),
         }
 
-       # Set default model
+        # Set default model
         self.model = self.models['Nano']
 
         # Initialize video and slider properties
@@ -30,9 +29,12 @@ class ObjectDetectionApp(QMainWindow):
         self.frame_counter = 0
         self.total_frames = 0
         self.video_length_slider_pressed = False  # To track when the user is dragging the slider
+        self.prev_gray = None  # To store the previous frame for optical flow
 
         # Add toggle for frame enhancement
         self.enhancement_enabled = False
+
+        # Add toggle for airflow detection
         self.airflow_enabled = False
 
     def initUI(self):
@@ -49,10 +51,9 @@ class ObjectDetectionApp(QMainWindow):
         # Set the alignment to center
         self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         # Add border using setStyleSheet
-        self.video_label.setStyleSheet("border: 2px solid black;")  # Example: 2px solid black border
+        self.video_label.setStyleSheet("border: 2px solid black;")
 
         video_layout.addWidget(self.video_label)
-        
 
         # Slider for video progress
         self.video_slider = QSlider(Qt.Orientation.Horizontal)
@@ -67,17 +68,17 @@ class ObjectDetectionApp(QMainWindow):
         # Controls layout on the right
         controls_layout = QVBoxLayout()
 
-        # Add airflow checkbox for airflow visualization
-        self.airflow_checkbox = QCheckBox("Mostrar flujo de aire")
-        self.airflow_checkbox.setChecked(False)
-        self.airflow_checkbox.stateChanged.connect(self.toggle_airflow)
-        controls_layout.addWidget(self.airflow_checkbox)
-
-         # Enhancement toggle
+        # Enhancement toggle
         self.enhancement_checkbox = QCheckBox("Activar Estandarización")
         self.enhancement_checkbox.setChecked(False)
         self.enhancement_checkbox.stateChanged.connect(self.toggle_enhancement)
         controls_layout.addWidget(self.enhancement_checkbox)
+
+        # Airflow detection toggle
+        self.airflow_checkbox = QCheckBox("Detección de Flujo de Aire")
+        self.airflow_checkbox.setChecked(False)
+        self.airflow_checkbox.stateChanged.connect(self.toggle_airflow)
+        controls_layout.addWidget(self.airflow_checkbox)
 
         # Model Selector button
         self.model_button = self.create_button("Seleccionar Modelo")
@@ -96,13 +97,9 @@ class ObjectDetectionApp(QMainWindow):
         # FPS Slider
         self.fps_slider = self.create_slider("FPS", controls_layout, self.update_fps, 1, 60, 10, 30)
 
-        # Brightness button
-        #self.brightness_button = self.create_button("Brightness")
-        #controls_layout.addWidget(self.brightness_button)
-
         # Start and Stop buttons
         start_stop_layout = QHBoxLayout()
-        self.start_button = self.create_button("Inicar")
+        self.start_button = self.create_button("Iniciar")
         self.start_button.clicked.connect(self.start_video)
         start_stop_layout.addWidget(self.start_button)
 
@@ -128,10 +125,6 @@ class ObjectDetectionApp(QMainWindow):
         # Set default thresholds
         self.iou_threshold = 0.5
         self.confidence_threshold = 0.2
-    
-    def toggle_airflow(self):
-        """Toggle the airflow visualization on or off."""
-        self.airflow_enabled = self.airflow_checkbox.isChecked()
 
     def create_button(self, text):
         """Helper function to create styled buttons"""
@@ -198,6 +191,10 @@ class ObjectDetectionApp(QMainWindow):
         """Toggle the enhancement feature on or off."""
         self.enhancement_enabled = self.enhancement_checkbox.isChecked()
 
+    def toggle_airflow(self):
+        """Toggle the airflow detection feature on or off."""
+        self.airflow_enabled = self.airflow_checkbox.isChecked()
+
     def open_file(self):
         file_name, _ = QFileDialog.getOpenFileName(self, "Open Image or Video", filter="Video Files (*.mp4 *.mov);;Image Files (*.png *.jpg *.jpeg)")
         if file_name:
@@ -213,13 +210,41 @@ class ObjectDetectionApp(QMainWindow):
         self.video_slider.setMaximum(self.total_frames)  # Set slider range based on total frames
 
     def start_video(self):
-        if self.cap is not None and not self.timer.isActive():
-            self.update_fps()  # Update timer interval based on the current FPS slider value
-            self.timer.start()  # Start the timer
+        if self.cap is not None:
+            self.timer.start(1000 // self.fps_slider.value())  # Set timer interval based on FPS slider
 
     def stop_video(self):
         if self.timer.isActive():
             self.timer.stop()
+
+    def pause_slider_update(self):
+        """Pause the slider update when the user starts dragging the slider."""
+        self.video_length_slider_pressed = True
+
+    def seek_video(self):
+        """Seek the video to the frame corresponding to the slider position"""
+        self.video_length_slider_pressed = False
+        slider_value = self.video_slider.value()
+        self.frame_counter = slider_value
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, slider_value)
+        self.start_video()
+
+    def update_fps(self):
+        """Update FPS based on the FPS slider"""
+        fps = self.fps_slider.value()
+        self.timer.setInterval(1000 // fps)
+
+    def draw_airflow_arrows(self, frame, flow, step=16):
+        """Draw arrows on the frame based on optical flow with fewer arrows."""
+        h, w = frame.shape[:2]
+        # Increase the step to reduce the number of arrows (larger grid spacing)
+        y, x = np.mgrid[step//8:h:step, step//2:w:step].reshape(2, -1).astype(int)
+        fx, fy = flow[y, x].T
+        lines = np.vstack([x, y, x + fx * 10, y + fy * 10]).T.reshape(-1, 2, 2)
+        lines = np.int32(lines)
+
+        for (x1, y1), (x2, y2) in lines:
+            cv2.arrowedLine(frame, (x1, y1), (x2, y2), (0, 255, 0), 2, tipLength=0.5)  # Solid arrows, thickness 2
 
     def increase_orange_intensity(self, frame):
         """Enhances the orange areas in a video frame (e.g., fire)"""
@@ -245,135 +270,105 @@ class ObjectDetectionApp(QMainWindow):
         except Exception as e:
             print(f"Failed to enhance frame: {e}")
             return frame  # Return the original frame if there's an issue
+        
+    def extract_smoke_frame(self, frame, results):
+        """Returns a frame with only smoke detected by the model."""
+        smoke_class_index = 0  # Replace with the actual index for "smoke" in your model's class list
+        
+        # Create a mask for the detected smoke
+        smoke_mask = np.zeros(frame.shape[:2], dtype=np.uint8)
+
+        for result in results[0].boxes:
+            if result.cls == smoke_class_index:
+                # Get the bounding box coordinates
+                x1, y1, x2, y2 = map(int, result.xyxy[0])
+                # Fill the mask for the detected smoke
+                smoke_mask[y1:y2, x1:x2] = 255  # Set to 255 (white) where smoke is detected
+
+        # Bitwise AND to isolate smoke areas
+        smoke_frame = cv2.bitwise_and(frame, frame, mask=smoke_mask)
+
+        return smoke_frame
 
     def update_frame(self):
         """Read the next frame from the video, enhance its colors, and process it"""
         if self.cap is not None and self.cap.isOpened():
             ret, frame = self.cap.read()
             if ret:
-                self.frame_counter += 1
-                if not self.video_length_slider_pressed:
-                    self.video_slider.setValue(self.frame_counter)
+                # Convert frame to grayscale for optical flow
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-                    # Enhance the frame's orange areas only if the toggle is enabled
+                # YOLOv8 detection on the current frame
+                results = self.model.predict(frame, conf=self.confidence_threshold, iou=self.iou_threshold)
+                result_frame = results[0].plot()
+
+                # Enhance frame colors if enabled
                 if self.enhancement_enabled:
-                    frame = self.increase_orange_intensity(frame)
+                    result_frame = self.increase_orange_intensity(result_frame)
 
-                # **Airflow Visualization**: Apply optical flow if the checkbox is checked
-                if self.airflow_enabled:
-                    frame = self.visualize_airflow(frame)
+                # Check if smoke was detected in the current frame
+                smoke_class_index = 0  # Replace with the actual index for "smoke" in your model's class list
+                smoke_detected = any(result.cls == smoke_class_index for result in results[0].boxes)
+                #smoke_frame = self.extract_smoke_frame(result_frame, results)
 
-                # Display the processed frame in the UI
-                self.display_results(frame)
+                # Optical flow-based airflow detection, only if smoke is detected
+                if smoke_detected and self.prev_gray is not None and self.airflow_enabled:
+                    flow = cv2.calcOpticalFlowFarneback(self.prev_gray, gray, None, 0.5, 1, 25, 2, 5, 1.2, 0)
+                    self.draw_airflow_arrows(result_frame, flow)
+
+                # Update previous frame for optical flow calculation
+                self.prev_gray = gray
+
+                # Show the processed frame
+                self.display_results(result_frame)
+
+                # Update slider only if the user is not manually dragging it
+                if not self.video_length_slider_pressed:
+                    self.frame_counter += 1
+                    self.video_slider.setValue(self.frame_counter)
             else:
                 self.stop_video()  # Stop video if it reaches the end
 
-    def visualize_airflow(self, frame):
-        """Visualize airflow using dense optical flow."""
-        try:
-            # Convert to grayscale for optical flow calculation
-            gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-            # Initialize the previous frame for the first iteration
-            if not hasattr(self, 'prev_gray_frame'):
-                self.prev_gray_frame = gray_frame
-                return frame  # Return the original frame as there's no previous frame to compare
-
-            # Calculate dense optical flow using Farneback method
-            flow = cv2.calcOpticalFlowFarneback(
-                self.prev_gray_frame, gray_frame, None, 0.5, 3, 15, 3, 5, 1.2, 0
-            )
-
-            # Get the flow vectors (dx, dy)
-            h, w = gray_frame.shape[:2]
-            step = 20  # Define step size to place arrows
-
-            for y in range(0, h, step):
-                for x in range(0, w, step):
-                    # Get the flow vector at the position (x, y)
-                    dx, dy = flow[y, x]
-
-                    # Draw an arrow for the flow
-                    cv2.arrowedLine(
-                        frame,
-                        (x, y),
-                        (int(x + dx), int(y + dy)),
-                        (0, 255, 0), 2, tipLength=0.5
-                    )
-
-            # Update the previous frame
-            self.prev_gray_frame = gray_frame
-
-            return frame  # Return the frame with airflow arrows
-        except Exception as e:
-            print(f"Failed to visualize airflow: {e}")
-            return frame  # Return original frame if there's an issue
-
     def display_results(self, img):
-            """Convert the detected frame to QImage and display it"""
-            rgb_image = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            height, width, channel = rgb_image.shape
-            q_img = QImage(rgb_image.data, width, height, 3 * width, QImage.Format.Format_RGB888)
-            self.video_label.setPixmap(QPixmap.fromImage(q_img).scaled(self.video_label.width(), self.video_label.height(), Qt.AspectRatioMode.KeepAspectRatio))
-    
-    def pause_slider_update(self):
-        """Pause video updates when the slider is being dragged"""
-        self.video_length_slider_pressed = True
-        self.timer.stop()
-
-    def update_fps(self):
-        """Update the timer interval based on the FPS slider value."""
-        fps = self.fps_slider.value()
-        self.timer.setInterval(1000 // fps)  # Set interval in milliseconds based on FPS value
-
-    def seek_video(self):
-        """Seek the video to the frame corresponding to the slider position"""
-        self.video_length_slider_pressed = False
-        slider_value = self.video_slider.value()
-        self.frame_counter = slider_value
-        self.cap.set(cv2.CAP_PROP_POS_FRAMES, slider_value)
-        self.start_video()
-
-    def run_object_detection(self, file_path):
-        """Run detection on a single image file"""
-        img = cv2.imread(file_path)
-        results = self.model.predict(img, conf=self.confidence_threshold, iou=self.iou_threshold)
-        result_img = results[0].plot()
-        self.display_results(result_img)
+        """Convert the detected frame to QImage and display it"""
+        rgb_image = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        height, width, channel = rgb_image.shape
+        q_img = QImage(rgb_image.data, width, height, 3 * width, QImage.Format.Format_RGB888)
+        self.video_label.setPixmap(QPixmap.fromImage(q_img).scaled(self.video_label.width(), self.video_label.height(), Qt.AspectRatioMode.KeepAspectRatio))
 
     def open_fire_report_form(self):
         """Open the form to report wildfire details"""
         form = FireReportForm(self)
         form.exec()
 
+
+
 class ModelSelectorDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Select Model")
-        self.setFixedSize(300, 100)
 
-        # Layout
+        # Create layout
         layout = QVBoxLayout()
 
-        # ComboBox for model selection
-        self.combo_box = QComboBox(self)
-        self.combo_box.addItems(['Nano', 'Small', 'Medium', 'Large'])
-        layout.addWidget(self.combo_box)
+        # Add combo box for model selection
+        self.model_combobox = QComboBox(self)
+        self.model_combobox.addItems(["Nano", "Small", "Medium", "Large"])
+        layout.addWidget(self.model_combobox)
 
-        # OK and Cancel buttons
-        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        button_box.accepted.connect(self.accept)
-        button_box.rejected.connect(self.reject)
-        layout.addWidget(button_box)
+        # Add OK and Cancel buttons
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, self)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
 
+        # Set the layout
         self.setLayout(layout)
 
     def get_selected_model(self):
-        """Get the selected model name from the combo box"""
-        return self.combo_box.currentText()
-    
-# Placeholder for sending SMS
-# Placeholder for sending SMS
+        """Return the selected model"""
+        return self.model_combobox.currentText()
+
 def send_sms(location, area, height, municipio, estado, localidad, fire_type, people_around):
     message = f"""
     🚨 Alerta de Incendio
@@ -490,8 +485,8 @@ class FireReportForm(QDialog):
         QMessageBox.information(self, "Enviado", "El reporte ha sido enviado exitosamente.")
         self.accept()
 
-
-if __name__ == '__main__':
+# Running the app
+if __name__ == "__main__":
     app = QApplication([])
     window = ObjectDetectionApp()
     window.show()
