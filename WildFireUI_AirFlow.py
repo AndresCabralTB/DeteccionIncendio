@@ -5,6 +5,26 @@ from PyQt6.QtWidgets import QCheckBox, QMessageBox, QLineEdit, QApplication, QMa
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QPixmap, QImage, QFont
 from ultralytics import YOLO
+import firebase_admin
+from firebase_admin import credentials
+from firebase_admin import db
+from datetime import datetime
+from email.message import EmailMessage
+import ssl
+import smtplib
+
+# Initialize Firebase
+cred = credentials.Certificate('wildfiredetection-72d0f-firebase-adminsdk-4dohx-79a6b85888.json')
+firebase_admin.initialize_app(cred, {
+    'databaseURL': 'https://wildfiredetection-72d0f-default-rtdb.firebaseio.com/'
+})
+
+# Get a reference to the database
+ref = db.reference('reports')
+contacts_ref = db.reference('contacts')  # Reference where phone numbers are stored
+
+
+
 
 class ObjectDetectionApp(QMainWindow):
     def __init__(self):
@@ -13,10 +33,10 @@ class ObjectDetectionApp(QMainWindow):
 
         # Load all YOLOv8 models
         self.models = {
-            "Nano": YOLO("/Users/andrescabral/Desktop/Prácticas /WildFire UI/Models/fire_n.pt"),
-            "Small": YOLO("/Users/andrescabral/Desktop/Prácticas /WildFire UI/Models/fire_s.pt"),
-            "Medium": YOLO("/Users/andrescabral/Desktop/Prácticas /WildFire UI/Models/fire_m.pt"),
-            "Large": YOLO("/Users/andrescabral/Desktop/Prácticas /WildFire UI/Models/fire_l.pt"),
+            "Nano": YOLO("/Users/andrescabral/Documents/School/NovemoSemestre/Prácticas/WildFireUI/Models/fire_n.pt"),
+            "Small": YOLO("/Users/andrescabral/Documents/School/NovemoSemestre/Prácticas/WildFireUI/Models/fire_s.pt"),
+            "Medium": YOLO("/Users/andrescabral/Documents/School/NovemoSemestre/Prácticas/WildFireUI/Models/fire_m.pt"),
+            "Large": YOLO("/Users/andrescabral/Documents/School/NovemoSemestre/Prácticas/WildFireUI/Models/fire_l.pt"),
         }
 
         # Set default model
@@ -36,6 +56,12 @@ class ObjectDetectionApp(QMainWindow):
 
         # Add toggle for airflow detection
         self.airflow_enabled = False
+        self.fireflow_enabled = False
+
+        # In your ObjectDetectionApp class or main window setup:
+
+        
+
 
     def initUI(self):
         self.setWindowTitle("Detección de Incendios y Humo")
@@ -80,13 +106,25 @@ class ObjectDetectionApp(QMainWindow):
         self.airflow_checkbox.stateChanged.connect(self.toggle_airflow)
         controls_layout.addWidget(self.airflow_checkbox)
 
+        # Fire detection toggle
+        self.fireflow_checkbox = QCheckBox("Detección de Flujo de Fuego")
+        self.fireflow_checkbox.setChecked(False)
+        self.fireflow_checkbox.stateChanged.connect(self.toggle_fireflow)
+        controls_layout.addWidget(self.fireflow_checkbox)
+
         # Model Selector button
-        self.model_button = self.create_button("Seleccionar Modelo")
+        self.model_button = QPushButton("Seleccionar Modelo")
         self.model_button.clicked.connect(self.open_model_selector)
         controls_layout.addWidget(self.model_button)
 
+        # Add Model Upload Button
+        self.upload_model_button = QPushButton("Agregar Modelo")
+        self.upload_model_button.clicked.connect(self.add_custom_model)
+        controls_layout.addWidget(self.upload_model_button)
+
+
         # Upload video or image button
-        self.upload_button = self.create_button("Seleccionar Video")
+        self.upload_button = QPushButton("Seleccionar Video")
         self.upload_button.clicked.connect(self.open_file)
         controls_layout.addWidget(self.upload_button)
 
@@ -99,19 +137,23 @@ class ObjectDetectionApp(QMainWindow):
 
         # Start and Stop buttons
         start_stop_layout = QHBoxLayout()
-        self.start_button = self.create_button("Iniciar")
+        self.start_button = QPushButton("Iniciar")
         self.start_button.clicked.connect(self.start_video)
         start_stop_layout.addWidget(self.start_button)
 
-        self.stop_button = self.create_button("Pausa")
+        self.stop_button = QPushButton("Pausa")
         self.stop_button.clicked.connect(self.stop_video)
         start_stop_layout.addWidget(self.stop_button)
         controls_layout.addLayout(start_stop_layout)
 
         # **Add Fire Report Button**
-        self.report_button = self.create_button("Generar Reporte de Incendio")
+        self.report_button = QPushButton("Generar Reporte de Incendio")
         self.report_button.clicked.connect(self.open_fire_report_form)
         controls_layout.addWidget(self.report_button)
+
+        self.add_contact_button = QPushButton("Add Contact")
+        self.add_contact_button.clicked.connect(self.open_contact_form)
+        controls_layout.addWidget(self.add_contact_button)
 
         # Add video and controls to the main layout
         main_layout.addLayout(video_layout)
@@ -172,15 +214,12 @@ class ObjectDetectionApp(QMainWindow):
         return slider
 
     def update_iou_threshold(self):
-        """Update IOU threshold based on the slider value"""
         self.iou_threshold = self.iou_slider.value() / 100.0
 
     def update_confidence_threshold(self):
-        """Update Confidence threshold based on the slider value"""
         self.confidence_threshold = self.confidence_slider.value() / 100.0
 
     def open_model_selector(self):
-        """Open a dialog to select the model"""
         dialog = ModelSelectorDialog(self)
         if dialog.exec():
             selected_model = dialog.get_selected_model()
@@ -188,12 +227,13 @@ class ObjectDetectionApp(QMainWindow):
                 self.model = self.models[selected_model]
 
     def toggle_enhancement(self):
-        """Toggle the enhancement feature on or off."""
         self.enhancement_enabled = self.enhancement_checkbox.isChecked()
 
     def toggle_airflow(self):
-        """Toggle the airflow detection feature on or off."""
         self.airflow_enabled = self.airflow_checkbox.isChecked()
+
+    def toggle_fireflow(self):
+        self.fireflow_enabled = self.fireflow_checkbox.isChecked()
 
     def open_file(self):
         file_name, _ = QFileDialog.getOpenFileName(self, "Open Image or Video", filter="Video Files (*.mp4 *.mov);;Image Files (*.png *.jpg *.jpeg)")
@@ -204,7 +244,6 @@ class ObjectDetectionApp(QMainWindow):
                 self.run_object_detection(file_name)
 
     def load_video(self, file_name):
-        """Load the video and prepare for playback"""
         self.cap = cv2.VideoCapture(file_name)
         self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
         self.video_slider.setMaximum(self.total_frames)  # Set slider range based on total frames
@@ -218,11 +257,9 @@ class ObjectDetectionApp(QMainWindow):
             self.timer.stop()
 
     def pause_slider_update(self):
-        """Pause the slider update when the user starts dragging the slider."""
         self.video_length_slider_pressed = True
 
     def seek_video(self):
-        """Seek the video to the frame corresponding to the slider position"""
         self.video_length_slider_pressed = False
         slider_value = self.video_slider.value()
         self.frame_counter = slider_value
@@ -234,20 +271,8 @@ class ObjectDetectionApp(QMainWindow):
         fps = self.fps_slider.value()
         self.timer.setInterval(1000 // fps)
 
-    def draw_airflow_arrows(self, frame, flow, step=16):
-        """Draw arrows on the frame based on optical flow with fewer arrows."""
-        h, w = frame.shape[:2]
-        # Increase the step to reduce the number of arrows (larger grid spacing)
-        y, x = np.mgrid[step//8:h:step, step//2:w:step].reshape(2, -1).astype(int)
-        fx, fy = flow[y, x].T
-        lines = np.vstack([x, y, x + fx * 10, y + fy * 10]).T.reshape(-1, 2, 2)
-        lines = np.int32(lines)
-
-        for (x1, y1), (x2, y2) in lines:
-            cv2.arrowedLine(frame, (x1, y1), (x2, y2), (0, 255, 0), 2, tipLength=0.5)  # Solid arrows, thickness 2
 
     def increase_orange_intensity(self, frame):
-        """Enhances the orange areas in a video frame (e.g., fire)"""
         try:
             # Convert the frame to HSV color space
             hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
@@ -272,7 +297,6 @@ class ObjectDetectionApp(QMainWindow):
             return frame  # Return the original frame if there's an issue
         
     def extract_smoke_frame(self, frame, results):
-        """Returns a frame with only smoke detected by the model."""
         smoke_class_index = 0  # Replace with the actual index for "smoke" in your model's class list
         
         # Create a mask for the detected smoke
@@ -290,8 +314,107 @@ class ObjectDetectionApp(QMainWindow):
 
         return smoke_frame
 
+    def calc_optical_flow_in_bbox(self, prev_frame, curr_frame, x1, y1, x2, y2):
+        """Calculate the optical flow within a bounding box."""
+        if prev_frame is None:
+            return None
+
+        # Extract region of interest (ROI) for the bounding box from both frames
+        prev_roi = prev_frame[y1:y2, x1:x2]
+        curr_roi = curr_frame[y1:y2, x1:x2]
+
+        # Calculate optical flow within the bounding box
+        flow = cv2.calcOpticalFlowFarneback(prev_roi, curr_roi, None, 0.5, 3, 15, 3, 5, 1.2, 0)
+
+        return flow
+
+    def draw_propagation_vectors(self, frame, flow, origin):
+        """Draw propagation vectors for the fire inside the bounding box with improved spacing and minimal clustering."""
+        if flow is None:
+            return
+
+        step = 20  # Step size for potential arrow positions
+        scale_factor = 10  # Scale factor for better visualization
+        min_distance = 15  # Minimum distance between arrow start points
+        x0, y0 = origin  # Starting coordinates for the arrows
+
+        # Get dimensions of the flow matrix
+        h, w = flow.shape[:2]
+
+        # Track drawn arrow start points to ensure spacing
+        drawn_points = []
+
+        for y in range(0, h, step):
+            for x in range(0, w, step):
+                # Get the flow vector (fx, fy)
+                fx, fy = flow[y, x]
+
+                # Only consider vectors with significant flow magnitude
+                if np.linalg.norm((fx, fy)) > 1:  # Adjust threshold as needed
+                    # Scale the flow vectors
+                    fx *= scale_factor
+                    fy *= scale_factor
+
+                    # Start point for the arrow
+                    start_point = (x0 + x, y0 + y)
+
+                    # Ensure sufficient distance from previously drawn arrows
+                    if all(np.linalg.norm((start_point[0] - px, start_point[1] - py)) >= min_distance for px, py in drawn_points):
+                        # End point for the arrow
+                        end_point = (int(start_point[0] + fx), int(start_point[1] + fy))
+
+                        # Ensure the end point is within frame bounds
+                        end_point = (
+                            max(0, min(frame.shape[1] - 1, end_point[0])),
+                            max(0, min(frame.shape[0] - 1, end_point[1]))
+                        )
+
+                        # Draw the arrow with improved visualization
+                        cv2.arrowedLine(
+                            frame,
+                            start_point,
+                            end_point,
+                            (255, 0, 0),  # Bright red color
+                            thickness=2,  # Increased thickness
+                            tipLength=0.4  # Larger tip length
+                        )
+
+                        # Add the current start point to the list of drawn points
+                        drawn_points.append(start_point)
+
+
+    def add_custom_model(self):
+        file_name, _ = QFileDialog.getOpenFileName(
+            self, 
+            "Seleccionar Modelo Personalizado", 
+            "", 
+            "YOLO Model Files (*.pt);;All Files (*)"
+        )
+        
+        if file_name:
+            try:
+                # Load the user-provided model
+                custom_model = YOLO(file_name)
+                
+                # Add the model to the models dictionary with a unique key
+                model_name = os.path.basename(file_name).split('.')[0]
+                self.models[model_name] = custom_model
+                
+                # Inform the user
+                QMessageBox.information(
+                    self, 
+                    "Modelo Agregado", 
+                    f"El modelo '{model_name}' se agregó correctamente."
+                )
+            except Exception as e:
+                # Handle errors in loading the model
+                QMessageBox.critical(
+                    self, 
+                    "Error", 
+                    f"No se pudo cargar el modelo: {e}"
+                )
+
     def update_frame(self):
-        """Read the next frame from the video, enhance its colors, and process it"""
         if self.cap is not None and self.cap.isOpened():
             ret, frame = self.cap.read()
             if ret:
@@ -306,15 +429,43 @@ class ObjectDetectionApp(QMainWindow):
                 if self.enhancement_enabled:
                     result_frame = self.increase_orange_intensity(result_frame)
 
-                # Check if smoke was detected in the current frame
                 smoke_class_index = 0  # Replace with the actual index for "smoke" in your model's class list
-                smoke_detected = any(result.cls == smoke_class_index for result in results[0].boxes)
-                #smoke_frame = self.extract_smoke_frame(result_frame, results)
+                smoke_bboxes = [result.xyxy.cpu().numpy() for result in results[0].boxes if result.cls == smoke_class_index]
 
-                # Optical flow-based airflow detection, only if smoke is detected
-                if smoke_detected and self.prev_gray is not None and self.airflow_enabled:
+                fire_class_index = 1  # Assuming 'fire' is class index 1 in the model
+                fire_bboxes = [result.xyxy.cpu().numpy() for result in results[0].boxes if result.cls == fire_class_index]
+
+                if self.airflow_enabled and smoke_bboxes:
+                    # Extract smoke frame only if smoke is detected
+                    new_frame = self.extract_smoke_frame(result_frame, results)
                     flow = cv2.calcOpticalFlowFarneback(self.prev_gray, gray, None, 0.5, 1, 25, 2, 5, 1.2, 0)
-                    self.draw_airflow_arrows(result_frame, flow)
+
+                    # Draw airflow arrows only within the smoke bounding box
+                    for bbox in smoke_bboxes:
+                        # bbox should now be in the format [x1, y1, x2, y2]
+                        # Make sure to convert it to a regular list or array if it's still a tensor
+                        bbox = bbox.flatten()  # Flatten if it's still multidimensional
+                        x1, y1, x2, y2 = map(int, bbox)
+
+                        # Extract the region of interest (ROI) for airflow calculation
+                        roi_flow = flow[y1:y2, x1:x2]
+
+                        # Draw arrows only in this ROI
+                        self.draw_airflow_arrows(new_frame, roi_flow, (y1, x1))
+                        
+                        alpha = 0.5  # Control transparency; 0.0 = frame1 only, 1.0 = frame2 only
+                        result_frame = cv2.addWeighted(new_frame, alpha, result_frame, 1 - alpha, 0)
+
+                if self.fireflow_enabled and fire_bboxes:
+                    for bbox in fire_bboxes:
+                        bbox = bbox.flatten()  # Flatten the bbox coordinates
+                        x1, y1, x2, y2 = map(int, bbox)
+
+                        # Region of interest (ROI) for the fire bounding box
+                        roi_flow = self.calc_optical_flow_in_bbox(self.prev_gray, gray, x1, y1, x2, y2)
+
+                        # Draw propagation arrows inside the bounding box
+                        self.draw_propagation_vectors(result_frame, roi_flow, (x1, y1))
 
                 # Update previous frame for optical flow calculation
                 self.prev_gray = gray
@@ -329,16 +480,64 @@ class ObjectDetectionApp(QMainWindow):
             else:
                 self.stop_video()  # Stop video if it reaches the end
 
+   
+
+    def draw_airflow_arrows(self, frame, flow, origin, target_arrows=100):
+        # Get the dimensions of the flow
+        h, w = flow.shape[:2]
+        y0, x0 = origin  # Origin for placing arrows
+
+        # Dynamically calculate step size to ensure target_arrows are drawn
+        total_area = h * w
+        step = max(10, int((total_area / target_arrows) ** 0.5))  # At least 10 pixels apart
+
+        scale_factor = 10  # Adjust scale factor for arrow size
+
+        for y in range(0, h, step):
+            for x in range(0, w, step):
+                # Get the flow vector at the point (x, y)
+                fx, fy = flow[y, x]
+
+                # Check if flow is significant enough to draw an arrow
+                if np.linalg.norm((fx, fy)) > 2:  # Adjust the threshold as needed
+                    # Scale the flow vectors
+                    fx *= scale_factor
+                    fy *= scale_factor
+
+                    # Define the start and end points for the arrow
+                    start_point = (x0 + x, y0 + y)
+                    end_point = (int(start_point[0] + fx), int(start_point[1] + fy))
+
+                    # Ensure the end point is within frame bounds
+                    end_point = (
+                        max(0, min(frame.shape[1] - 1, end_point[0])), 
+                        max(0, min(frame.shape[0] - 1, end_point[1]))
+                    )
+
+                    # Draw the arrow on the frame with improved visibility
+                    cv2.arrowedLine(
+                        frame,
+                        start_point,
+                        end_point,
+                        (0, 255, 0),  # Bright green color
+                        thickness=2,
+                        tipLength=0.3
+                    )
+
+
+
     def display_results(self, img):
-        """Convert the detected frame to QImage and display it"""
         rgb_image = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         height, width, channel = rgb_image.shape
         q_img = QImage(rgb_image.data, width, height, 3 * width, QImage.Format.Format_RGB888)
         self.video_label.setPixmap(QPixmap.fromImage(q_img).scaled(self.video_label.width(), self.video_label.height(), Qt.AspectRatioMode.KeepAspectRatio))
 
     def open_fire_report_form(self):
-        """Open the form to report wildfire details"""
         form = FireReportForm(self)
+        form.exec()
+    
+    def open_contact_form(self):
+        form = ContactForm(self)
         form.exec()
 
 
@@ -351,10 +550,9 @@ class ModelSelectorDialog(QDialog):
         # Create layout
         layout = QVBoxLayout()
 
-        # Add combo box for model selection
         self.model_combobox = QComboBox(self)
-        self.model_combobox.addItems(["Nano", "Small", "Medium", "Large"])
-        layout.addWidget(self.model_combobox)
+        self.model_combobox.addItems(parent.models.keys())  # Dynamically populate models
+        layout.addWidget(self.model_combobox)   
 
         # Add OK and Cancel buttons
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, self)
@@ -365,94 +563,67 @@ class ModelSelectorDialog(QDialog):
         # Set the layout
         self.setLayout(layout)
 
+        # Set the layout
+        self.setLayout(layout)
+
     def get_selected_model(self):
         """Return the selected model"""
         return self.model_combobox.currentText()
-
-def send_sms(location, area, height, municipio, estado, localidad, fire_type, people_around):
-    message = f"""
-    🚨 Alerta de Incendio
-    Localización: {location}, {localidad}, {municipio}, {estado}
-    Área afectada: {area} m²
-    Altura de las llamas: {height} m
-    Tipo de incendio: {fire_type}
-    Precaución: Se recomienda evitar la zona.
-    Estado de personas: {'Hay' if people_around == 'Sí' else 'No hay'} personas alrededor.
-
-    Si te encuentras en las cercanías, por favor mantén la calma y sigue las indicaciones de seguridad locales.
-    """
-    print(f"Sending SMS with message:\n{message}")
-    # Replace the print statement with actual SMS API integration (e.g., Twilio)
 
 
 class FireReportForm(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Reporte de Incendio")
-        self.setFixedSize(400, 575)  # Ajustar tamaño de ventana para incluir nuevos campos
+        self.setFixedSize(400, 575)
 
         layout = QVBoxLayout()
 
-        # Localización del incendio Label
+        # Form fields
         self.location_label = QLabel("Localización del incendio")
         layout.addWidget(self.location_label)
-        # Localización del incendio TextField
         self.location_input = QLineEdit(self)
         self.location_input.setPlaceholderText("Localización del incendio")
         layout.addWidget(self.location_input)
 
-        # Área del incendio Label
         self.area_label = QLabel("Área del incendio (m²)")
         layout.addWidget(self.area_label)
-        # Área del incendio TextField
         self.area_input = QLineEdit(self)
         self.area_input.setPlaceholderText("Área del incendio (m²)")
         layout.addWidget(self.area_input)
 
-        # Altura del incendio Label
         self.altura_label = QLabel("Altura del incendio (m)")
         layout.addWidget(self.altura_label)
-        # Altura del incendio
         self.height_input = QLineEdit(self)
         self.height_input.setPlaceholderText("Altura del incendio (m)")
         layout.addWidget(self.height_input)
 
-        # **Municipio Label**
         self.municipio_label = QLabel("Municipio")
         layout.addWidget(self.municipio_label)
-        # **Municipio TextField**
         self.municipio_input = QLineEdit(self)
         self.municipio_input.setPlaceholderText("Municipio")
         layout.addWidget(self.municipio_input)
 
-        # **Estado Label**
         self.estado_label = QLabel("Estado")
         layout.addWidget(self.estado_label)
-        # **Estado TextField**
         self.estado_input = QLineEdit(self)
         self.estado_input.setPlaceholderText("Estado")
         layout.addWidget(self.estado_input)
 
-        # **Localidad Label**
         self.localidad_label = QLabel("Localidad")
         layout.addWidget(self.localidad_label)
-        # **Localidad TextField**
         self.localidad_input = QLineEdit(self)
         self.localidad_input.setPlaceholderText("Localidad")
         layout.addWidget(self.localidad_input)
 
-        # Incendio controlado Label
         self.tipo_label = QLabel("Indique tipo de incendio")
         layout.addWidget(self.tipo_label)
-        # Tipo de incendio: Controlado o No Controlado
         self.fire_type_combo = QComboBox(self)
         self.fire_type_combo.addItems(["Controlado", "No Controlado"])
         layout.addWidget(self.fire_type_combo)
 
-        # Incendio controlado Label
         self.personas_label = QLabel("Hay personas alrededor?")
         layout.addWidget(self.personas_label)
-        # Hay personas alrededor: Sí o No
         self.people_around_combo = QComboBox(self)
         self.people_around_combo.addItems(["Sí", "No"])
         layout.addWidget(self.people_around_combo)
@@ -466,7 +637,7 @@ class FireReportForm(QDialog):
         self.setLayout(layout)
 
     def send_report(self):
-        """Send SMS with the filled report data."""
+        """Send SMS with the filled report data to all phone numbers in the database."""
         location = self.location_input.text()
         area = self.area_input.text()
         height = self.height_input.text()
@@ -476,13 +647,109 @@ class FireReportForm(QDialog):
         fire_type = self.fire_type_combo.currentText()
         people_around = self.people_around_combo.currentText()
 
-        # Validación de campos requeridos
+        # Validate required fields
         if not location or not area or not height or not municipio or not estado or not localidad:
             QMessageBox.warning(self, "Error", "Por favor, rellena todos los campos.")
             return
 
-        send_sms(location, area, height, municipio, estado, localidad, fire_type, people_around)
-        QMessageBox.information(self, "Enviado", "El reporte ha sido enviado exitosamente.")
+        # Get current date and time
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # Create a new report
+        new_report = {
+            'location': location,
+            'area': area,
+            'height': height,
+            'municipio': municipio,
+            'estado': estado,
+            'localidad': localidad,
+            'fire_type': fire_type,
+            'people_around': people_around,
+            'timestamp': current_time  # Add timestamp to the report
+
+        }
+
+        # Push the new report to the database
+        ref.push(new_report)
+
+        # Format the alert message
+        message = (
+            f"🚨 Alerta de Incendio 🚨\n\n"
+            f"Fecha y hora: {current_time}\n"
+            f"📍 Ubicación: {location}, {localidad}, {municipio}, {estado}\n"
+            f"🔥 Área afectada: {area} m²\n"
+            f"📏 Altura de llamas: {height} m\n"
+            f"🚒 Tipo: {fire_type}\n"
+            f"⚠️ Precaución: Evitar la zona.\n"
+            f"👥 Personas alrededor: {'Sí' if people_around == 'Sí' else 'No'}"
+        )
+        
+        email_sender = "greentechtestin01@gmail.com"
+        email_passoword = "rywz relm smcy fkmz"
+        #email_receiver = "andrescabral108@gmail.com"
+        
+        # Retrieve all phone numbers from the database
+        contacts = contacts_ref.get()
+        if contacts:
+            for contact_id, contact in contacts.items():
+                email_receiver = contact.get("email")
+                #phone_number = contact.get("phone_number")
+                try:
+                    subject = "Alerta de Incendio"
+                    em = EmailMessage()
+                    em["From"] = email_sender
+                    em["To"] = email_receiver
+                    em["Subject"] = subject
+                    em.set_content(message)
+
+                    context = ssl.create_default_context()
+                    with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context) as smtp:
+                        smtp.login(email_sender, email_passoword)
+                        smtp.sendmail(email_sender, email_receiver, em.as_string())
+                            
+                except Exception as e:
+                    print(f"Failed to send email to {email_receiver}: {e}")
+        
+        QMessageBox.information(self, "Enviado", "El reporte ha sido enviado exitosamente a todos los contactos.")
+        self.accept()
+
+class ContactForm(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Add Contact")
+        self.setFixedSize(300, 150)
+
+        layout = QVBoxLayout()
+
+        # Phone number label and input
+        self.phone_label = QLabel("Email Address")
+        layout.addWidget(self.phone_label)
+        self.phone_input = QLineEdit(self)
+        self.phone_input.setPlaceholderText("JohnSmith@gmail.com")  # Placeholder format for international numbers
+        layout.addWidget(self.phone_input)
+
+        # Save button
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        button_box.accepted.connect(self.save_contact)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+
+        self.setLayout(layout)
+
+    def save_contact(self):
+        """Save the entered phone number to Firebase."""
+        phone_number = self.phone_input.text().strip()
+
+        # Validate that a phone number is entered
+        if not phone_number:
+            QMessageBox.warning(self, "Error", "Please enter an email address")
+            return
+
+        # Save phone number to Firebase under 'contacts'
+        contact = {'email': phone_number}
+        contacts_ref.push(contact)  # Push the contact to the database
+
+        QMessageBox.information(self, "Contact Added", "The phone number has been saved successfully.")
         self.accept()
 
 # Running the app
